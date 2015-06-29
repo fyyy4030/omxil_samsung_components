@@ -1,7 +1,7 @@
 #!/bin/sh
 
 
-cflags="-I$OMX_INSTALL_PATH/include -I$TOOLCHAIN_PATH/include \
+cflags="-O0 -g -I$OMX_INSTALL_PATH/include -I$TOOLCHAIN_PATH/include \
 	-I$OMXCORE_INCLUDE_PATH \
 	-L$OMX_INSTALL_PATH/usr/local/lib \
 	$OMX_CFLAGS " 

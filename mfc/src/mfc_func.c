@@ -26,6 +26,7 @@
 
 #include <unistd.h>
 #include <linux/videodev2.h>
+#include <libexplain/ioctl.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -37,6 +38,43 @@
 #include "mfc_func.h"
 #include "parser.h"
 #include "tile_convert.h"
+
+
+int ioctl_new(int fd,int request,void *argp)
+{
+  char defbuf[32];
+  const char* dn=defbuf;
+  
+  switch (request){
+  case -2140645888:  dn="VIDIOC_QUERYCAP";break;
+  case -1060350459: dn="VIDIOC_S_FMT";break;
+  case -1060350460: dn="VIDIOC_G_FMT";break;
+  case -1072409080: dn="VIDIOC_REQBUFS";break;
+  case -1069263351: dn="VIDIOC_QUERYBUF";break;
+  case -1069263345: dn="VIDIOC_QBUF";break;
+  case 1074026002: dn="VIDIOC_STREAMON";break;
+  case -1072409029: dn="VIDIOC_G_CROP";break;
+  case -1073195493: dn="VIDIOC_G_CTRL";break;
+  case -1069263343: dn="VIDIOC_DQBUF";break;
+  default:
+    sprintf(defbuf,"%d",request);
+  }
+  
+  DEBUG(DEB_LEV_ERR, "MFC ioctl request %s\n",dn);
+
+ // printf("request: %d\n",request);
+
+  int ret =  ioctl(fd,request,argp);
+
+  if(ret < 0 && request != VIDIOC_DQBUF)
+   printf("%s\n", explain_ioctl(fd, request, argp));
+
+  return ret;
+
+}
+
+//#define ioctl ioctl_new
+
 
 #define memzero(x)\
         memset(&(x), 0, sizeof (x));
@@ -119,6 +157,8 @@ OMX_ERRORTYPE MFCAllocInputBuffers(omx_videodec_component_PrivateType* omx_video
 	struct v4l2_requestbuffers reqbuf;
 	struct v4l2_buffer buf;
 	struct v4l2_plane planes[MFC_NUM_PLANES];
+	struct v4l2_format fmt;
+
 	int ret;
 
 	// First lets request buffers
@@ -166,7 +206,18 @@ OMX_ERRORTYPE MFCAllocInputBuffers(omx_videodec_component_PrivateType* omx_video
 		return OMX_ErrorHardware;
 	}
 
-	return OMX_ErrorNone;
+ 	// First set the  desired output format
+  memzero(fmt);
+  fmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_YUV420M;
+	//fmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12M;
+	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+	ret = ioctl(omx_videodec_component_Private->mfcFileHandle, VIDIOC_S_FMT, &fmt);
+	if (ret) {
+    DEBUG(DEB_LEV_ERR, "Failed to set V4L2_PIX_FMT_YUV420M fmt for MFC capture\n");
+    return OMX_ErrorHardware;
+  }
+ 
+ 	return OMX_ErrorNone;
 }
 
 OMX_ERRORTYPE MFCQueueOutputBuffer(omx_videodec_component_PrivateType* omx_videodec_component_Private, OMX_U32 bufferIndex)
@@ -205,7 +256,7 @@ OMX_ERRORTYPE MFCAllocOutputBuffers(omx_videodec_component_PrivateType* omx_vide
 	int ret;
 	int i, j;
 
-	// First lets request buffers
+	// Second lets request buffers
 	memzero(reqbuf);
 	reqbuf.count    = omx_videodec_component_Private->mfcOutBufferMinCount + MFC_DEFUALT_EXTRA_OUT_BUFFERS_COUNT;
 	reqbuf.type     = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -226,6 +277,7 @@ OMX_ERRORTYPE MFCAllocOutputBuffers(omx_videodec_component_PrivateType* omx_vide
 
 	for (i = 0; i < reqbuf.count; i++) {
 		memzero(buf);
+    memzero(planes);
 		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 		buf.memory = V4L2_MEMORY_MMAP;
 		buf.index = i;
@@ -239,7 +291,7 @@ OMX_ERRORTYPE MFCAllocOutputBuffers(omx_videodec_component_PrivateType* omx_vide
 		}
 
 		for (j = 0; j < MFC_NUM_PLANES; j++) {
-			DEBUG(DEB_LEV_FULL_SEQ, "Plane %d Length: %d\n", j, buf.m.planes[j].length);
+			DEBUG(DEB_LEV_FULL_SEQ, "Plane %d Length: %d offset: %d\n", j, buf.m.planes[j].length, buf.m.planes[j].m.mem_offset);
 			omx_videodec_component_Private->mfcOutBufferPlaneSize[j] = buf.m.planes[j].length;
 			omx_videodec_component_Private->mfcOutBuffer[i][j] =
 					mmap(NULL, buf.m.planes[j].length, PROT_READ | PROT_WRITE,
@@ -274,13 +326,16 @@ OMX_ERRORTYPE MFCStartProcessing(omx_videodec_component_PrivateType* omx_videode
 	int ret;
 
 	type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-
-	ret = ioctl(omx_videodec_component_Private->mfcFileHandle, VIDIOC_STREAMON, &type);
+  
+  ret = ioctl(omx_videodec_component_Private->mfcFileHandle, VIDIOC_STREAMON, &type);
 	if (ret) {
 		DEBUG(DEB_LEV_ERR, "Failed to start header processing\n");
 		return OMX_ErrorHardware;
 	}
 
+  int saved_flags = fcntl(omx_videodec_component_Private->mfcFileHandle, F_GETFL);
+  fcntl(omx_videodec_component_Private->mfcFileHandle, F_SETFL, saved_flags | O_NONBLOCK);
+  
 	return OMX_ErrorNone;
 }
 
@@ -381,8 +436,6 @@ OMX_ERRORTYPE MFCReadHeadInfo(omx_videodec_component_PrivateType* omx_videodec_c
 	omx_videodec_component_Private->mfcOutBufferCropLeft = crop.c.left;
 	omx_videodec_component_Private->mfcOutBufferCropTop = crop.c.top;
 
-
-
 	DEBUG(DEB_LEV_FULL_SEQ, "MFC movie crop is: (l=%d, t=%d, w=%d, h=%d)\n",
 			(unsigned int)omx_videodec_component_Private->mfcOutBufferCropLeft,
 			(unsigned int)omx_videodec_component_Private->mfcOutBufferCropTop,
@@ -397,7 +450,8 @@ OMX_ERRORTYPE MFCReadHeadInfo(omx_videodec_component_PrivateType* omx_videodec_c
 
 	DEBUG(DEB_LEV_FULL_SEQ, "MFC min buffer number is: %d\n", ctrl.value);
 	omx_videodec_component_Private->mfcOutBufferMinCount = ctrl.value;
-	return OMX_ErrorNone;
+	
+  return OMX_ErrorNone;
 }
 
 OMX_BOOL MFCInputBufferProcessed(omx_videodec_component_PrivateType* omx_videodec_component_Private)
@@ -408,7 +462,7 @@ OMX_BOOL MFCInputBufferProcessed(omx_videodec_component_PrivateType* omx_videode
 	p.fd = omx_videodec_component_Private->mfcFileHandle;
 	p.events = POLLOUT;
 
-	ret = poll(&p, 1, 0);
+	ret = poll(&p, 1, 300);
 
 	if (ret < 0) {
 		DEBUG(DEB_LEV_ERR, "Error while polling MFC file descriptor\n");
@@ -416,28 +470,10 @@ OMX_BOOL MFCInputBufferProcessed(omx_videodec_component_PrivateType* omx_videode
 	}
 
 	if (ret == 0)
+  {
+    DEBUG(DEB_LEV_FULL_SEQ, "Polling MFC Input returns 0: revent: %d\n",p.revents);
 		return OMX_FALSE;
-
-	return OMX_TRUE;
-}
-
-OMX_BOOL MFCOutputBufferProcessed(omx_videodec_component_PrivateType* omx_videodec_component_Private)
-{
-	struct pollfd p;
-	int ret;
-
-	p.fd = omx_videodec_component_Private->mfcFileHandle;
-	p.events = POLLIN;
-
-	ret = poll(&p, 1, 0);
-
-	if (ret < 0) {
-		DEBUG(DEB_LEV_ERR, "Error while polling MFC file descriptor\n");
-		return OMX_FALSE;
-	}
-
-	if (ret == 0)
-		return OMX_FALSE;
+  }
 
 	return OMX_TRUE;
 }
@@ -449,6 +485,7 @@ OMX_ERRORTYPE MFCDequeueInputBuffer(omx_videodec_component_PrivateType* omx_vide
 	int ret;
 
 	memzero(qbuf);
+	memzero(planes);
 	qbuf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
 	qbuf.memory = V4L2_MEMORY_MMAP;
 	qbuf.m.planes = planes;
@@ -470,6 +507,7 @@ OMX_ERRORTYPE MFCDequeueOutputBuffer(omx_videodec_component_PrivateType* omx_vid
 	int ret;
 
 	memzero(qbuf);
+	memzero(planes);
 	qbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 	qbuf.memory = V4L2_MEMORY_MMAP;
 	qbuf.m.planes = planes;
@@ -477,7 +515,9 @@ OMX_ERRORTYPE MFCDequeueOutputBuffer(omx_videodec_component_PrivateType* omx_vid
 
 	ret = ioctl(omx_videodec_component_Private->mfcFileHandle, VIDIOC_DQBUF, &qbuf);
 	if (ret) {
-			DEBUG(DEB_LEV_ERR, "Failed to dequeue\n");
+			if(errno == EAGAIN)
+        return OMX_ErrorNotReady;
+      DEBUG(DEB_LEV_ERR, "Failed to dequeue (%d)\n", errno);
 			return OMX_ErrorHardware;
 	}
 
@@ -491,8 +531,6 @@ OMX_ERRORTYPE MFCDequeueOutputBuffer(omx_videodec_component_PrivateType* omx_vid
 
 	return OMX_ErrorNone;
 }
-
-
 
 OMX_ERRORTYPE MFCParseAndQueueInput(omx_videodec_component_PrivateType* omx_videodec_component_Private, OMX_BUFFERHEADERTYPE* pInputBuffer)
 {
@@ -617,60 +655,60 @@ OMX_ERRORTYPE MFCParseAndQueueInput(omx_videodec_component_PrivateType* omx_vide
 				(unsigned int)omx_videodec_component_Private->mfcInBufferOff
 				);
 
-			if (pInputBuffer->nFilledLen != 0) {
+    if (pInputBuffer->nFilledLen != 0) {
 
-				switch(omx_videodec_component_Private->video_coding_type) {
-				case OMX_VIDEO_CodingAVC:
-					parserConsumed = h264_ParseStream(
-									pInputBuffer->pBuffer + pInputBuffer->nOffset,
-									pInputBuffer->nFilledLen,
-									omx_videodec_component_Private->mfcInBuffer + omx_videodec_component_Private->mfcInBufferOff,
-									omx_videodec_component_Private->mfcInBufferSize - omx_videodec_component_Private->mfcInBufferOff,
-									&omx_videodec_component_Private->mfcH264ParserState,
-									&omx_videodec_component_Private->mfcParserLastFrameFinished,
-									&parserCopied,
-									OMX_FALSE
-								);
-				break;
-				case OMX_VIDEO_CodingH263:
-				case OMX_VIDEO_CodingMPEG4:
-					parserConsumed = mpeg4_ParseStream(pInputBuffer->pBuffer + pInputBuffer->nOffset,
-									pInputBuffer->nFilledLen,
-									omx_videodec_component_Private->mfcInBuffer + omx_videodec_component_Private->mfcInBufferOff,
-									omx_videodec_component_Private->mfcInBufferSize - omx_videodec_component_Private->mfcInBufferOff,
-									&omx_videodec_component_Private->mfcMPEG4ParserState,
-									&omx_videodec_component_Private->mfcParserLastFrameFinished,
-									&parserCopied,
-									OMX_FALSE
-									);
-				break;
-				case OMX_VIDEO_CodingMPEG2:
-					parserConsumed = mpeg2_ParseStream(pInputBuffer->pBuffer + pInputBuffer->nOffset,
-									pInputBuffer->nFilledLen,
-									omx_videodec_component_Private->mfcInBuffer + omx_videodec_component_Private->mfcInBufferOff,
-									omx_videodec_component_Private->mfcInBufferSize - omx_videodec_component_Private->mfcInBufferOff,
-									&omx_videodec_component_Private->mfcMPEG4ParserState,
-									&omx_videodec_component_Private->mfcParserLastFrameFinished,
-									&parserCopied,
-									OMX_FALSE
-									);
-				break;
-				default:
-					DEBUG(DEB_LEV_ERR, "Unknown video codec chosen.\n");
-					return OMX_ErrorComponentNotFound;
-				}
-				if (pInputBuffer->nFilledLen < parserConsumed) {
-					DEBUG(DEB_LEV_ERR, "Parser consumed more data than was available\n");
-					return OMX_ErrorUnderflow;
-				}
+      switch(omx_videodec_component_Private->video_coding_type) {
+      case OMX_VIDEO_CodingAVC:
+        parserConsumed = h264_ParseStream(
+                pInputBuffer->pBuffer + pInputBuffer->nOffset,
+                pInputBuffer->nFilledLen,
+                omx_videodec_component_Private->mfcInBuffer + omx_videodec_component_Private->mfcInBufferOff,
+                omx_videodec_component_Private->mfcInBufferSize - omx_videodec_component_Private->mfcInBufferOff,
+                &omx_videodec_component_Private->mfcH264ParserState,
+                &omx_videodec_component_Private->mfcParserLastFrameFinished,
+                &parserCopied,
+                OMX_FALSE
+              );
+      break;
+      case OMX_VIDEO_CodingH263:
+      case OMX_VIDEO_CodingMPEG4:
+        parserConsumed = mpeg4_ParseStream(pInputBuffer->pBuffer + pInputBuffer->nOffset,
+                pInputBuffer->nFilledLen,
+                omx_videodec_component_Private->mfcInBuffer + omx_videodec_component_Private->mfcInBufferOff,
+                omx_videodec_component_Private->mfcInBufferSize - omx_videodec_component_Private->mfcInBufferOff,
+                &omx_videodec_component_Private->mfcMPEG4ParserState,
+                &omx_videodec_component_Private->mfcParserLastFrameFinished,
+                &parserCopied,
+                OMX_FALSE
+                );
+      break;
+      case OMX_VIDEO_CodingMPEG2:
+        parserConsumed = mpeg2_ParseStream(pInputBuffer->pBuffer + pInputBuffer->nOffset,
+                pInputBuffer->nFilledLen,
+                omx_videodec_component_Private->mfcInBuffer + omx_videodec_component_Private->mfcInBufferOff,
+                omx_videodec_component_Private->mfcInBufferSize - omx_videodec_component_Private->mfcInBufferOff,
+                &omx_videodec_component_Private->mfcMPEG4ParserState,
+                &omx_videodec_component_Private->mfcParserLastFrameFinished,
+                &parserCopied,
+                OMX_FALSE
+                );
+      break;
+      default:
+        DEBUG(DEB_LEV_ERR, "Unknown video codec chosen.\n");
+        return OMX_ErrorComponentNotFound;
+      }
+      if (pInputBuffer->nFilledLen < parserConsumed) {
+        DEBUG(DEB_LEV_ERR, "Parser consumed more data than was available\n");
+        return OMX_ErrorUnderflow;
+      }
 
-				pInputBuffer->nFilledLen -= parserConsumed;
-				pInputBuffer->nOffset += parserConsumed;
-			} else {
-				DEBUG(DEB_LEV_FULL_SEQ, "%s: Sending last frame of size %d\n", __func__, omx_videodec_component_Private->mfcInBufferOff);
-				omx_videodec_component_Private->mfcParserLastFrameFinished = OMX_TRUE;
-				parserCopied = 0;
-			}
+      pInputBuffer->nFilledLen -= parserConsumed;
+      pInputBuffer->nOffset += parserConsumed;
+    } else {
+      DEBUG(DEB_LEV_FULL_SEQ, "%s: Sending last frame of size %d\n", __func__, omx_videodec_component_Private->mfcInBufferOff);
+      omx_videodec_component_Private->mfcParserLastFrameFinished = OMX_TRUE;
+      parserCopied = 0;
+    }
 
 		if (omx_videodec_component_Private->mfcParserLastFrameFinished) {
 			omx_videodec_component_Private->mfcInBufferFilled = parserCopied + omx_videodec_component_Private->mfcInBufferOff;
@@ -703,50 +741,59 @@ OMX_ERRORTYPE MFCProcessAndDequeueOutput(omx_videodec_component_PrivateType* omx
 {
 	OMX_U32 outBufIndex;
 	int ret;
+  unsigned int i;
 
-	DEBUG(DEB_LEV_FULL_SEQ, "OutputPoll: %d\n", MFCOutputBufferProcessed(omx_videodec_component_Private));
+  ret = MFCDequeueOutputBuffer(omx_videodec_component_Private, &outBufIndex);
+  //TIME("Dequeued out mfc buf number: %d\n", (int)outBufIndex);
+  if (ret == OMX_ErrorNotReady)
+  {
+    DEBUG(DEB_LEV_FULL_SEQ, "%s: No buffer available!\n", __func__);
+    return OMX_ErrorNone;  
+  }      
+  else if (ret != OMX_ErrorNone)
+  {
+    DEBUG(DEB_LEV_ERR, "%s: Error Dequeueing buffer!\n", __func__);
+    return OMX_ErrorHardware;
+  }
+
+  DEBUG(DEB_LEV_FULL_SEQ, "%s: Got a buffer from MFC\n", __func__);
+
+  //if (!omx_videodec_component_Private->tunelledOutput) {
+  if (omx_videodec_component_Private->samsungProprietaryCommunication) {
+    //pOutputBuffer->pBuffer = (OMX_U8 *)&omx_videodec_component_Private->mfcSamsungProprietaryBuffers[outBufIndex];
+
+    memcpy(pOutputBuffer->pBuffer, &omx_videodec_component_Private->mfcSamsungProprietaryBuffers[outBufIndex], sizeof(SAMSUNG_NV12MT_BUFFER));
+
+    pOutputBuffer->nFilledLen = sizeof(SAMSUNG_NV12MT_BUFFER);
+    pOutputBuffer->nOffset = 0;
 
 
-	if (MFCOutputBufferProcessed(omx_videodec_component_Private)) {
-		ret = MFCDequeueOutputBuffer(omx_videodec_component_Private, &outBufIndex);
-		TIME("Dequeued out mfc buf number: %d\n", (int)outBufIndex);
-		DEBUG(DEB_LEV_FULL_SEQ, "Dequeued output buffer with index (!): %d\n", (unsigned int)outBufIndex);
-		if (ret != OMX_ErrorNone)
-			return ret;
+  } else if (MFC_NUM_PLANES == 2) {
+  
+    Y_tile_to_linear_4x2(pOutputBuffer->pBuffer,
+              omx_videodec_component_Private->mfcOutBuffer[outBufIndex][0],
+              omx_videodec_component_Private->mfcOutBufferCropWidth,
+              omx_videodec_component_Private->mfcOutBufferCropHeight
+              );
 
-		DEBUG(DEB_LEV_FULL_SEQ, "%s: Got a buffer from MFC\n", __func__);
+    CbCr_tile_to_linear_4x2(pOutputBuffer->pBuffer + omx_videodec_component_Private->mfcOutBufferCropWidth * omx_videodec_component_Private->mfcOutBufferCropHeight,
+        omx_videodec_component_Private->mfcOutBuffer[outBufIndex][1],
+        omx_videodec_component_Private->mfcOutBufferCropWidth,
+        omx_videodec_component_Private->mfcOutBufferCropHeight);
 
-		//if (!omx_videodec_component_Private->tunelledOutput) {
-		if (omx_videodec_component_Private->samsungProprietaryCommunication) {
-			//pOutputBuffer->pBuffer = (OMX_U8 *)&omx_videodec_component_Private->mfcSamsungProprietaryBuffers[outBufIndex];
-
-			memcpy(pOutputBuffer->pBuffer, &omx_videodec_component_Private->mfcSamsungProprietaryBuffers[outBufIndex], sizeof(SAMSUNG_NV12MT_BUFFER));
-
-			pOutputBuffer->nFilledLen = sizeof(SAMSUNG_NV12MT_BUFFER);
-			pOutputBuffer->nOffset = 0;
-
-
-		} else{
-			Y_tile_to_linear_4x2(pOutputBuffer->pBuffer,
-								omx_videodec_component_Private->mfcOutBuffer[outBufIndex][0],
-								omx_videodec_component_Private->mfcOutBufferCropWidth,
-								omx_videodec_component_Private->mfcOutBufferCropHeight
-								);
-
-			CbCr_tile_to_linear_4x2(pOutputBuffer->pBuffer + omx_videodec_component_Private->mfcOutBufferCropWidth * omx_videodec_component_Private->mfcOutBufferCropHeight,
-					omx_videodec_component_Private->mfcOutBuffer[outBufIndex][1],
-					omx_videodec_component_Private->mfcOutBufferCropWidth,
-					omx_videodec_component_Private->mfcOutBufferCropHeight);
-
-			pOutputBuffer->nFilledLen = (3 * omx_videodec_component_Private->mfcOutBufferCropWidth * omx_videodec_component_Private->mfcOutBufferCropHeight) / 2;
-			pOutputBuffer->nOffset = 0;
-
-			ret = MFCQueueOutputBuffer(omx_videodec_component_Private, outBufIndex);
-			if (ret != OMX_ErrorNone)
-				return ret;
-
-		}
-	}
-	return OMX_ErrorNone;
+    pOutputBuffer->nFilledLen = (3 * omx_videodec_component_Private->mfcOutBufferCropWidth * omx_videodec_component_Private->mfcOutBufferCropHeight) / 2;
+    pOutputBuffer->nOffset = 0;
+  } else {
+    pOutputBuffer->nFilledLen = 0;
+    for (i=0;i<3;i++)
+    {
+      memcpy(pOutputBuffer->pBuffer+pOutputBuffer->nFilledLen, omx_videodec_component_Private->mfcOutBuffer[outBufIndex][i],omx_videodec_component_Private->mfcOutBufferPlaneSize[i]);
+      pOutputBuffer->nFilledLen+=omx_videodec_component_Private->mfcOutBufferPlaneSize[i];
+    }
+    pOutputBuffer->nOffset = 0;
+  }
+  ret = MFCQueueOutputBuffer(omx_videodec_component_Private, outBufIndex);
+  if (ret != OMX_ErrorNone)
+    return ret;
 }
 

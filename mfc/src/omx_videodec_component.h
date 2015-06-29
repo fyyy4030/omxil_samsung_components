@@ -77,17 +77,17 @@
 /* Size for compressed MFC buffer size */
 #define MFC_COMPRESSED_BUFFER_SIZE (1 << 20)
 /* MFC device name */
-#define MFC_DEVICE_NAME "/dev/video8"
+#define MFC_DEVICE_NAME "/dev/video6"
 
 /* Number of planes used by MFC - this can not be modified - it is determined by the pixel format
  * used by the hardware */
-#define MFC_NUM_PLANES 2
+#define MFC_NUM_PLANES 3
 /* Maximum number of MFC output buffer - again this is limited by the hardware */
 #define MFC_MAX_OUT_BUFFERS 32
 
 /* The default number of extra buffers for output. This is the number that will be added
  * to the minimum number of buffers required by MFC */
-#define MFC_DEFUALT_EXTRA_OUT_BUFFERS_COUNT 1
+#define MFC_DEFUALT_EXTRA_OUT_BUFFERS_COUNT 2
 
 /* H264 parser states */
 enum mfc_h264_parser_state {
